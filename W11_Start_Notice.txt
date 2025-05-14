@@ -1,0 +1,10 @@
+# Script de notificación de inicio de actualización a Windows 11
+# Descripción: Muestra mensaje visual de inicio de actualización.
+
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.MessageBox]::Show(
+    "El proceso de actualizacion a Windows 11 ha comenzado. Puedes seguir trabajando mientras tanto.",
+    "Actualizacion iniciada",
+    [System.Windows.Forms.MessageBoxButtons]::OK,
+    [System.Windows.Forms.MessageBoxIcon]::Information
+)

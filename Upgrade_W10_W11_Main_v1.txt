@@ -1,0 +1,120 @@
+# Script de actualización silenciosa de Windows 10 a Windows 11
+# Descripción: Ejecuta actualización silenciosa, registra logs, y muestra notificaciones al usuario.
+# Script de actualización silenciosa de Windows 10 a Windows 11 con notificación y reinicio forzado
+
+$Path = "C:\W11\Win11_24H2_Spanish_x64.iso"
+$LogFile = "C:\Install\W11_Upgrade_Log.txt"
+$SetupLog = "C:\`$WINDOWS.~BT\Sources\Panther\setupact.log"
+$StartNoticeScript = "C:\W11\W11_Start_Notice.ps1"
+$RebootPopupScript = "C:\W11\W11_Reboot_Popup.ps1"
+
+# Crear carpeta de log si no existe
+$logDir = Split-Path $LogFile
+if (-not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
+
+function Write-Log {
+    param([string]$message)
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $message" | Out-File -Append -FilePath $LogFile
+    Write-Host "$timestamp - $message"
+}
+
+# Detectar usuario activo
+$activeUser = (Get-WmiObject -Class Win32_ComputerSystem).UserName
+if (-not $activeUser) {
+    Write-Log "ERROR: No se pudo detectar un usuario activo."
+    exit 1
+}
+$activeUserShort = ($activeUser -split '\\')[-1]
+
+# Ejecutar notificacion inicial en el perfil del usuario activo
+$taskName = "W11_StartNotice_$(Get-Random)"
+$now = (Get-Date).AddMinutes(2)
+$startTime = "{0:HH:mm}" -f $now
+schtasks /Create /TN $taskName /TR "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$StartNoticeScript`"" /SC ONCE /ST $startTime /F /RL HIGHEST /RU "$activeUserShort"
+schtasks /Run /TN $taskName
+Start-Sleep -Seconds 5
+schtasks /Delete /TN $taskName /F
+
+# Ejecutar proceso de instalación en segundo plano
+Start-Job -Name Install -ArgumentList $Path, $LogFile -ScriptBlock {
+    param($isoPath, $logPath)
+
+    function Write-Log {
+        param([string]$message)
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        "$timestamp - $message" | Out-File -Append -FilePath $logPath
+    }
+
+    try {
+        if (-not (Test-Path $isoPath)) {
+            Write-Log "ERROR: No se encontró el archivo ISO: $isoPath"
+            return
+        }
+
+        Write-Log "Montando ISO..."
+        $image = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
+        Start-Sleep -Seconds 3
+
+        $vol = Get-Volume -DiskImage $image
+        $drive = ($vol | Select-Object -First 1).DriveLetter
+        $mountPoint = "$drive`:"
+        Write-Log "ISO montada en $mountPoint"
+
+        $setup = "$mountPoint\setup.exe"
+        if (-not (Test-Path $setup)) {
+            throw "No se encontró setup.exe en $mountPoint"
+        }
+
+        Write-Log "Ejecutando setup.exe silenciosamente..."
+        $params = @{
+            FilePath     = $setup
+            ArgumentList = '/Auto Upgrade', '/Quiet', '/MigrateDrivers all', '/DynamicUpdate Disable', '/Telemetry disable', '/compat IgnoreWarning', '/ShowOOBE none', '/NoReboot', "/eula accept", "/copylogs $logPath"
+            PassThru     = $true
+            Wait         = $true
+        }
+
+        $proc = Start-Process @params
+        $proc.WaitForExit()
+
+        Write-Log "Desmontando ISO..."
+        Dismount-DiskImage -ImagePath $isoPath
+
+        Write-Log "Proceso de instalación completado."
+    }
+    catch {
+        Write-Log "ERROR: $_"
+    }
+}
+
+Wait-Job -Name Install | Out-Null
+Receive-Job -Name Install | Out-Null
+
+Write-Log "Validando creación de log personalizado..."
+if (Test-Path $LogFile) {
+    Write-Log "Log personalizado creado correctamente."
+} else {
+    Write-Log "ERROR: No se generó el log personalizado."
+}
+
+Write-Log "Buscando evento de reinicio pendiente en setupact.log..."
+if (Test-Path $SetupLog) {
+    $found = Select-String -Path $SetupLog -Pattern "Reporting pending reboot event"
+    if ($found) {
+        Write-Log "Upgrade finalizado correctamente. El sistema está listo para reiniciar."
+
+        $taskName2 = "W11_Reboot_Notice_$(Get-Random)"
+        $now2 = (Get-Date).AddMinutes(3)
+        $startTime2 = "{0:HH:mm}" -f $now2
+        schtasks /Create /TN $taskName2 /TR "powershell -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$RebootPopupScript`"" /SC ONCE /ST $startTime2 /F /RL HIGHEST /RU "$activeUserShort"
+        schtasks /Run /TN $taskName2
+        Start-Sleep -Seconds 5
+        schtasks /Delete /TN $taskName2 /F
+    } else {
+        Write-Log "No se encontró el evento esperado. Revisa el archivo setupact.log para más detalles."
+    }
+} else {
+    Write-Log "No se encontró setupact.log"
+}
